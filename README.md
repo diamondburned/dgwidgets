@@ -5,7 +5,8 @@ Make widgets with embeds and reactions. Forked to be compatible with [Arikawa](h
 
 # Example usage
 ```go
-func (bot *Bot) Trigger(m *gateway.MessageCreateEvent) error {
+// PaginateDemo is a demonstration of the (forked) pagination library.
+func (bot *Bot) PaginateDemo(m *gateway.MessageCreateEvent) error {
 	p := dgwidgets.NewPaginator(bot.Ctx.Session, m.ChannelID)
 
 	// Add embed pages to paginator
