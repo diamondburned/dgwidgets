@@ -6,24 +6,43 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/diamondburned/arikawa/discord"
+	"github.com/diamondburned/arikawa/gateway"
+	"github.com/diamondburned/arikawa/session"
+)
+
+// emoji constants
+const (
+	NavPlus        = "➕"
+	NavPlay        = "▶"
+	NavPause       = "⏸"
+	NavStop        = "⏹"
+	NavRight       = "➡"
+	NavLeft        = "⬅"
+	NavUp          = "⬆"
+	NavDown        = "⬇"
+	NavEnd         = "⏩"
+	NavBeginning   = "⏪"
+	NavNumbers     = "🔢"
+	NavInformation = "ℹ"
+	NavSave        = "💾"
 )
 
 // Paginator provides a method for creating a navigatable embed
 type Paginator struct {
 	sync.Mutex
-	Pages []*discordgo.MessageEmbed
+	Pages []discord.Embed
 	Index int
 
 	// Loop back to the beginning or end when on the first or last page.
 	Loop   bool
 	Widget *Widget
 
-	Ses *discordgo.Session
+	Session *session.Session
 
 	DeleteMessageWhenDone   bool
 	DeleteReactionsWhenDone bool
-	ColourWhenDone          int
+	ColourWhenDone          discord.Color // default red
 
 	lockToUser bool
 
@@ -33,15 +52,14 @@ type Paginator struct {
 // NewPaginator returns a new Paginator
 //    ses      : discordgo session
 //    channelID: channelID to spawn the paginator on
-func NewPaginator(ses *discordgo.Session, channelID string) *Paginator {
+func NewPaginator(ses *session.Session, channelID discord.Snowflake) *Paginator {
 	p := &Paginator{
-		Ses:   ses,
-		Pages: []*discordgo.MessageEmbed{},
-		Index: 0,
-		Loop:  false,
+		Session:                 ses,
+		Index:                   0,
+		Loop:                    false,
 		DeleteMessageWhenDone:   false,
 		DeleteReactionsWhenDone: false,
-		ColourWhenDone:          -1,
+		ColourWhenDone:          0xFF0000,
 		Widget:                  NewWidget(ses, channelID, nil),
 	}
 	p.addHandlers()
@@ -50,32 +68,38 @@ func NewPaginator(ses *discordgo.Session, channelID string) *Paginator {
 }
 
 func (p *Paginator) addHandlers() {
-	p.Widget.Handle(NavBeginning, func(w *Widget, r *discordgo.MessageReaction) {
+	p.Widget.Handle(NavBeginning, func(r *gateway.MessageReactionAddEvent) {
 		if err := p.Goto(0); err == nil {
 			p.Update()
 		}
 	})
-	p.Widget.Handle(NavLeft, func(w *Widget, r *discordgo.MessageReaction) {
+	p.Widget.Handle(NavLeft, func(r *gateway.MessageReactionAddEvent) {
 		if err := p.PreviousPage(); err == nil {
 			p.Update()
 		}
 	})
-	p.Widget.Handle(NavRight, func(w *Widget, r *discordgo.MessageReaction) {
+	p.Widget.Handle(NavBeginning, func(r *gateway.MessageReactionAddEvent) {
 		if err := p.NextPage(); err == nil {
 			p.Update()
 		}
 	})
-	p.Widget.Handle(NavEnd, func(w *Widget, r *discordgo.MessageReaction) {
+	p.Widget.Handle(NavBeginning, func(r *gateway.MessageReactionAddEvent) {
 		if err := p.Goto(len(p.Pages) - 1); err == nil {
 			p.Update()
 		}
 	})
-	p.Widget.Handle(NavNumbers, func(w *Widget, r *discordgo.MessageReaction) {
-		if msg, err := w.QueryInput("enter the page number you would like to open", r.UserID, 10*time.Second); err == nil {
-			if n, err := strconv.Atoi(msg.Content); err == nil {
-				p.Goto(n - 1)
-				p.Update()
-			}
+	p.Widget.Handle(NavNumbers, func(r *gateway.MessageReactionAddEvent) {
+		m, err := p.Widget.QueryInput(
+			"enter the page number you would like to open",
+			r.UserID, 10*time.Second,
+		)
+		if err != nil {
+			return
+		}
+
+		if n, err := strconv.Atoi(m.Content); err == nil {
+			p.Goto(n - 1)
+			p.Update()
 		}
 	})
 }
@@ -96,8 +120,12 @@ func (p *Paginator) Spawn() error {
 
 		// Delete Message when done
 		if p.DeleteMessageWhenDone && p.Widget.Message != nil {
-			p.Ses.ChannelMessageDelete(p.Widget.Message.ChannelID, p.Widget.Message.ID)
-		} else if p.ColourWhenDone >= 0 {
+			p.Session.DeleteMessage(
+				p.Widget.Message.ChannelID,
+				p.Widget.Message.ID,
+			)
+
+		} else if p.ColourWhenDone > 0 {
 			if page, err := p.Page(); err == nil {
 				page.Color = p.ColourWhenDone
 				p.Update()
@@ -106,7 +134,10 @@ func (p *Paginator) Spawn() error {
 
 		// Delete reactions when done
 		if p.DeleteReactionsWhenDone && p.Widget.Message != nil {
-			p.Ses.MessageReactionsRemoveAll(p.Widget.ChannelID, p.Widget.Message.ID)
+			p.Session.DeleteAllReactions(
+				p.Widget.ChannelID,
+				p.Widget.Message.ID,
+			)
 		}
 	}()
 
@@ -114,6 +145,7 @@ func (p *Paginator) Spawn() error {
 	if err != nil {
 		return err
 	}
+
 	p.Widget.Embed = page
 
 	return p.Widget.Spawn()
@@ -121,12 +153,12 @@ func (p *Paginator) Spawn() error {
 
 // Add a page to the paginator
 //    embed: embed page to add.
-func (p *Paginator) Add(embeds ...*discordgo.MessageEmbed) {
+func (p *Paginator) Add(embeds ...discord.Embed) {
 	p.Pages = append(p.Pages, embeds...)
 }
 
 // Page returns the page of the current index
-func (p *Paginator) Page() (*discordgo.MessageEmbed, error) {
+func (p *Paginator) Page() (*discord.Embed, error) {
 	p.Lock()
 	defer p.Unlock()
 
@@ -134,7 +166,7 @@ func (p *Paginator) Page() (*discordgo.MessageEmbed, error) {
 		return nil, ErrIndexOutOfBounds
 	}
 
-	return p.Pages[p.Index], nil
+	return &p.Pages[p.Index], nil
 }
 
 // NextPage sets the page index to the next page
@@ -214,7 +246,7 @@ func (p *Paginator) Running() bool {
 // Be its page number out of the total length of the embeds.
 func (p *Paginator) SetPageFooters() {
 	for index, embed := range p.Pages {
-		embed.Footer = &discordgo.MessageEmbedFooter{
+		embed.Footer = &discord.EmbedFooter{
 			Text: fmt.Sprintf("#[%d / %d]", index+1, len(p.Pages)),
 		}
 	}
