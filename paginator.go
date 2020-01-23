@@ -62,6 +62,7 @@ func NewPaginator(ses *session.Session, channelID discord.Snowflake) *Paginator 
 		ColourWhenDone:          0xFF0000,
 		Widget:                  NewWidget(ses, channelID, nil),
 	}
+
 	p.addHandlers()
 
 	return p
@@ -78,12 +79,12 @@ func (p *Paginator) addHandlers() {
 			p.Update()
 		}
 	})
-	p.Widget.Handle(NavBeginning, func(r *gateway.MessageReactionAddEvent) {
+	p.Widget.Handle(NavRight, func(r *gateway.MessageReactionAddEvent) {
 		if err := p.NextPage(); err == nil {
 			p.Update()
 		}
 	})
-	p.Widget.Handle(NavBeginning, func(r *gateway.MessageReactionAddEvent) {
+	p.Widget.Handle(NavEnd, func(r *gateway.MessageReactionAddEvent) {
 		if err := p.Goto(len(p.Pages) - 1); err == nil {
 			p.Update()
 		}

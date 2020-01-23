@@ -114,9 +114,21 @@ func (w *Widget) Spawn() error {
 		w.Session.React(w.Message.ChannelID, w.Message.ID, v)
 	}
 
+	// We need the bot's user ID.
+	u, err := w.Session.Me()
+	if err != nil {
+		return err
+	}
+
 	remove := w.Session.AddHandler(func(r *gateway.MessageReactionAddEvent) {
-		// Ignore reactions sent by bot
+		// Ignore reactions that don't belong to the message
 		if r.MessageID != w.Message.ID {
+			return
+		}
+
+		// Ignore reactions from the bot, as we'll end up removing our own
+		// reactions below.
+		if r.UserID == u.ID {
 			return
 		}
 
@@ -127,15 +139,13 @@ func (w *Widget) Spawn() error {
 		}
 
 		if w.DeleteReactions && w.isUserAllowed(r.UserID) {
-			go func() {
-				time.Sleep(time.Millisecond * 250)
-				w.Session.DeleteUserReaction(
-					r.ChannelID,
-					r.MessageID,
-					r.UserID,
-					r.Emoji.Name,
-				)
-			}()
+			time.Sleep(time.Millisecond * 250)
+			w.Session.DeleteUserReaction(
+				r.ChannelID,
+				r.MessageID,
+				r.UserID,
+				r.Emoji.Name,
+			)
 		}
 	})
 
@@ -161,7 +171,7 @@ func (w *Widget) Handle(emojiName string, handler WidgetHandler) error {
 
 	// if the widget is running, append the added emoji to the message.
 	if w.Running() && w.Message != nil {
-		return w.Session.React(w.Message.ChannelID, w.Message.ID, emojiName)
+		w.Session.React(w.Message.ChannelID, w.Message.ID, emojiName)
 	}
 
 	return nil
