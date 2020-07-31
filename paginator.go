@@ -52,7 +52,7 @@ type Paginator struct {
 // NewPaginator returns a new Paginator
 //    ses      : discordgo session
 //    channelID: channelID to spawn the paginator on
-func NewPaginator(ses *session.Session, channelID discord.Snowflake) *Paginator {
+func NewPaginator(ses *session.Session, channelID discord.ChannelID) *Paginator {
 	p := &Paginator{
 		Session:                 ses,
 		Index:                   0,

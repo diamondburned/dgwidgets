@@ -30,7 +30,7 @@ type Widget struct {
 	Embed     *discord.Embed
 	Message   *discord.Message
 	Session   *session.Session
-	ChannelID discord.Snowflake
+	ChannelID discord.ChannelID
 	Timeout   time.Duration
 	Close     chan struct{}
 
@@ -42,17 +42,13 @@ type Widget struct {
 	// Delete reactions after they are added
 	DeleteReactions bool
 	// Only allow listed users to use reactions.
-	UserWhitelist []discord.Snowflake
+	UserWhitelist []discord.UserID
 
 	running bool
 }
 
-// NewWidget returns a pointer to a Widget object
-//    ses      : discordgo session
-//    channelID: channelID to spawn the widget on
-func NewWidget(ses *session.Session,
-	channelID discord.Snowflake, embed *discord.Embed) *Widget {
-
+// NewWidget returns a new widget.
+func NewWidget(ses *session.Session, channelID discord.ChannelID, embed *discord.Embed) *Widget {
 	return &Widget{
 		ChannelID:       channelID,
 		Session:         ses,
@@ -66,7 +62,7 @@ func NewWidget(ses *session.Session,
 
 // isUserAllowed returns true if the user is allowed
 // to use this widget.
-func (w *Widget) isUserAllowed(userID discord.Snowflake) bool {
+func (w *Widget) isUserAllowed(userID discord.UserID) bool {
 	if w.UserWhitelist == nil || len(w.UserWhitelist) == 0 {
 		return true
 	}
@@ -182,7 +178,7 @@ func (w *Widget) Handle(emojiName string, handler WidgetHandler) error {
 //    userID : UserID to get message from
 //    timeout: How long to wait for the user's response
 func (w *Widget) QueryInput(
-	prompt string, userID discord.Snowflake,
+	prompt string, userID discord.UserID,
 	timeout time.Duration) (*gateway.MessageCreateEvent, error) {
 
 	msg, err := w.Session.SendMessage(
