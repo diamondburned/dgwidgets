@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/diamondburned/arikawa/discord"
-	"github.com/diamondburned/arikawa/gateway"
-	"github.com/diamondburned/arikawa/session"
+	"github.com/diamondburned/arikawa/v2/discord"
+	"github.com/diamondburned/arikawa/v2/gateway"
+	"github.com/diamondburned/arikawa/v2/session"
 )
 
 // emoji constants
@@ -43,8 +43,6 @@ type Paginator struct {
 	DeleteMessageWhenDone   bool
 	DeleteReactionsWhenDone bool
 	ColourWhenDone          discord.Color // default red
-
-	lockToUser bool
 
 	running bool
 }

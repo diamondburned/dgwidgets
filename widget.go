@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/diamondburned/arikawa/discord"
-	"github.com/diamondburned/arikawa/gateway"
-	"github.com/diamondburned/arikawa/session"
+	"github.com/diamondburned/arikawa/v2/discord"
+	"github.com/diamondburned/arikawa/v2/gateway"
+	"github.com/diamondburned/arikawa/v2/session"
 )
 
 // error vars
@@ -207,7 +207,7 @@ func (w *Widget) QueryInput(
 	case m := <-recv:
 		return m, nil
 	case <-after:
-		return nil, errors.New("Timed out")
+		return nil, errors.New("timed out")
 	}
 }
 
