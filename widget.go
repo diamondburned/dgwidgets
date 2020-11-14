@@ -2,37 +2,31 @@ package dgwidgets
 
 import (
 	"context"
-	"errors"
-	"sync"
-	"time"
+	"fmt"
 
 	"github.com/diamondburned/arikawa/v2/discord"
 	"github.com/diamondburned/arikawa/v2/gateway"
-	"github.com/diamondburned/arikawa/v2/session"
+	"github.com/diamondburned/arikawa/v2/state"
+	"github.com/pkg/errors"
 )
 
 // error vars
 var (
 	ErrAlreadyRunning   = errors.New("err: Widget already running")
 	ErrIndexOutOfBounds = errors.New("err: Index is out of bounds")
-	ErrNilMessage       = errors.New("err: Message is nil")
-	ErrNilEmbed         = errors.New("err: embed is nil")
 	ErrNotRunning       = errors.New("err: not running")
 )
 
-// WidgetHandler ...
-type WidgetHandler func(*gateway.MessageReactionAddEvent)
+type WidgetHandler = func(*gateway.MessageReactionAddEvent)
 
-// Widget is a message embed with reactions for buttons.
-// Accepts custom handlers for reactions.
+// Widget is a message embed with reactions for buttons. It accepts custom
+// handlers for reactions. It is not thread-safe.
 type Widget struct {
-	sync.Mutex
-	Embed     *discord.Embed
-	Message   *discord.Message
-	Session   *session.Session
-	ChannelID discord.ChannelID
-	Timeout   time.Duration
-	Close     chan struct{}
+	State     *state.State
+	ChannelID discord.ChannelID // const
+
+	Embed   discord.Embed
+	Message discord.Message
 
 	// Handlers binds emoji names to functions
 	Handlers map[string]WidgetHandler
@@ -44,28 +38,54 @@ type Widget struct {
 	// Only allow listed users to use reactions.
 	UserWhitelist []discord.UserID
 
+	ctx    context.Context
+	unbind func()
+
 	running bool
 }
 
 // NewWidget returns a new widget.
-func NewWidget(ses *session.Session, channelID discord.ChannelID, embed *discord.Embed) *Widget {
+func NewWidget(state *state.State, channelID discord.ChannelID) *Widget {
 	return &Widget{
-		ChannelID:       channelID,
-		Session:         ses,
+		State:     state,
+		ChannelID: channelID,
+
 		Keys:            []string{},
 		Handlers:        map[string]WidgetHandler{},
-		Close:           make(chan struct{}),
 		DeleteReactions: true,
-		Embed:           embed,
+
+		ctx: context.Background(),
 	}
 }
 
-// isUserAllowed returns true if the user is allowed
-// to use this widget.
-func (w *Widget) isUserAllowed(userID discord.UserID) bool {
-	if w.UserWhitelist == nil || len(w.UserWhitelist) == 0 {
-		return true
+// UseContext sets the internal context for everything. It errors out only if
+// the Widget has already been spawned.
+func (w *Widget) UseContext(ctx context.Context) error {
+	if w.IsRunning() {
+		return ErrAlreadyRunning
 	}
+
+	// Verify that the context is not expired.
+	select {
+	case <-w.ctx.Done():
+		return w.ctx.Err()
+	default:
+		break
+	}
+
+	w.ctx = ctx
+	w.State = w.State.WithContext(w.ctx)
+
+	return nil
+}
+
+// Done returns the internal context channel.
+func (w *Widget) Done() <-chan struct{} {
+	return w.ctx.Done()
+}
+
+// isUserAllowed returns true if the user is allowed to use this widget.
+func (w *Widget) isUserAllowed(userID discord.UserID) bool {
 	for _, user := range w.UserWhitelist {
 		if user == userID {
 			return true
@@ -74,49 +94,31 @@ func (w *Widget) isUserAllowed(userID discord.UserID) bool {
 	return false
 }
 
-// Spawn spawns the widget in channel w.ChannelID
+// Spawn spawns the widget in the given channel and blocks until the context has
+// expired.
 func (w *Widget) Spawn() error {
-	if w.Running() {
+	if err := w.Start(); err != nil {
+		return err
+	}
+	w.Wait()
+	return nil
+}
+
+// Starts sends out embeds and reactions but does not wait for timeout.
+func (w *Widget) Start() error {
+	if w.running {
 		return ErrAlreadyRunning
 	}
 
 	w.running = true
-	defer func() {
-		w.running = false
-	}()
-
-	if w.Embed == nil {
-		return ErrNilEmbed
-	}
-
-	// Create a context that can be timed out.
-	var ctx = context.Background()
-	if w.Timeout > 0 {
-		tCtx, cancel := context.WithTimeout(ctx, w.Timeout)
-		defer cancel()
-
-		ctx = tCtx
-	}
-
-	// Create initial message.
-	msg, err := w.Session.SendMessage(w.ChannelID, "", w.Embed)
-	if err != nil {
-		return err
-	}
-	w.Message = msg
-
-	// Add reaction buttons
-	for _, v := range w.Keys {
-		w.Session.React(w.Message.ChannelID, w.Message.ID, v)
-	}
 
 	// We need the bot's user ID.
-	u, err := w.Session.Me()
+	u, err := w.State.Me()
 	if err != nil {
 		return err
 	}
 
-	remove := w.Session.AddHandler(func(r *gateway.MessageReactionAddEvent) {
+	w.unbind = w.State.AddHandler(func(r *gateway.MessageReactionAddEvent) {
 		// Ignore reactions that don't belong to the message
 		if r.MessageID != w.Message.ID {
 			return
@@ -135,8 +137,7 @@ func (w *Widget) Spawn() error {
 		}
 
 		if w.DeleteReactions && w.isUserAllowed(r.UserID) {
-			time.Sleep(time.Millisecond * 250)
-			w.Session.DeleteUserReaction(
+			w.State.DeleteUserReaction(
 				r.ChannelID,
 				r.MessageID,
 				r.UserID,
@@ -145,20 +146,32 @@ func (w *Widget) Spawn() error {
 		}
 	})
 
-	defer remove()
-
-	select {
-	case <-w.Close:
-		return nil
-	case <-ctx.Done():
-		return nil
+	// Create initial message.
+	msg, err := w.State.SendEmbed(w.ChannelID, w.Embed)
+	if err != nil {
+		return err
 	}
+	w.Message = *msg
+
+	// Add reaction buttons
+	for _, v := range w.Keys {
+		if err := w.State.React(w.Message.ChannelID, w.Message.ID, v); err != nil {
+			return errors.Wrap(err, "failed to react to message")
+		}
+	}
+
+	return nil
 }
 
-// Handle adds a handler for the given emoji name
+// Wait waits until the widget has expired.
+func (w *Widget) Wait() {
+	<-w.ctx.Done()
+}
+
+// Handle adds a handler for the given emoji name.
+//
 //    emojiName: The unicode value of the emoji
 //    handler  : handler function to call when the emoji is clicked
-//               func(*Widget, *discordgo.MessageReaction)
 func (w *Widget) Handle(emojiName string, handler WidgetHandler) error {
 	if _, ok := w.Handlers[emojiName]; !ok {
 		w.Keys = append(w.Keys, emojiName)
@@ -166,64 +179,70 @@ func (w *Widget) Handle(emojiName string, handler WidgetHandler) error {
 	}
 
 	// if the widget is running, append the added emoji to the message.
-	if w.Running() && w.Message != nil {
-		w.Session.React(w.Message.ChannelID, w.Message.ID, emojiName)
+	if w.running {
+		return w.State.React(w.Message.ChannelID, w.Message.ID, emojiName)
 	}
 
 	return nil
 }
 
-// QueryInput querys the user with ID `id` for input
-//    prompt : Question prompt
-//    userID : UserID to get message from
-//    timeout: How long to wait for the user's response
+// QueryInput querys the user with userID for input. Both the returned message
+// along with the prompt will have already been deleted. The given ctx will be
+// used for timeout.
 func (w *Widget) QueryInput(
-	prompt string, userID discord.UserID,
-	timeout time.Duration) (*gateway.MessageCreateEvent, error) {
+	ctx context.Context,
+	prompt string,
+	userID discord.UserID) (reply *gateway.MessageCreateEvent, err error) {
 
-	msg, err := w.Session.SendMessage(
-		w.ChannelID, "<@"+userID.String()+">,  "+prompt, nil)
+	state := w.State.WithContext(ctx)
+
+	prompt = fmt.Sprintf("<@%d>, %s", userID, prompt)
+
+	msg, err := state.SendText(w.ChannelID, prompt)
 	if err != nil {
 		return nil, err
 	}
 
-	defer w.Session.DeleteMessage(msg.ChannelID, msg.ID)
+	recv := make(chan *gateway.MessageCreateEvent)
 
-	var recv = make(chan *gateway.MessageCreateEvent)
+	cancel := state.AddHandler(recv)
+	defer cancel()
 
-	remove := w.Session.AddHandler(func(m *gateway.MessageCreateEvent) {
-		if m.Author.ID != userID {
-			return
+WaitLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
+		case m := <-recv:
+			if m.Author.ID != userID {
+				continue
+			}
+
+			cancel()
+			reply = m
+			break WaitLoop
 		}
-
-		w.Session.DeleteMessage(m.ChannelID, m.ID)
-		recv <- m
-	})
-	defer remove()
-
-	after := time.After(timeout)
-
-	select {
-	case m := <-recv:
-		return m, nil
-	case <-after:
-		return nil, errors.New("timed out")
 	}
+
+	messageIDs := []discord.MessageID{msg.ID, reply.ID}
+
+	if err := state.DeleteMessages(w.ChannelID, messageIDs); err != nil {
+		return reply, errors.Wrap(err, "failed to clean up messages")
+	}
+
+	return reply, nil
 }
 
-// Running returns w.running
-func (w *Widget) Running() bool {
-	w.Lock()
-	running := w.running
-	w.Unlock()
-	return running
+// IsRunning returns true if the widget is running.
+func (w *Widget) IsRunning() bool {
+	return w.running
 }
 
-// UpdateEmbed updates the embed object and edits the original message
-//    embed: New embed object to replace w.Embed
-func (w *Widget) UpdateEmbed(embed *discord.Embed) (*discord.Message, error) {
-	if w.Message == nil {
-		return nil, ErrNilMessage
-	}
-	return w.Session.EditMessage(w.ChannelID, w.Message.ID, "", embed, false)
+// UpdateEmbed updates the embed object and edits the original message.
+//
+//    embed: New embed object to replace the internal embed
+func (w *Widget) UpdateEmbed(embed discord.Embed) (*discord.Message, error) {
+	w.Embed = embed
+	return w.State.EditEmbed(w.ChannelID, w.Message.ID, embed)
 }

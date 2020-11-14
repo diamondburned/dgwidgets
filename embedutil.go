@@ -5,6 +5,7 @@ import (
 )
 
 // EmbedsFromString splits a string into a slice of MessageEmbeds.
+//
 //     txt     : text to split
 //     chunklen: How long the text in each embed should be
 //               (if set to 0 or less, it defaults to 2048)

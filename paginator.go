@@ -1,14 +1,16 @@
 package dgwidgets
 
 import (
+	"context"
 	"fmt"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/diamondburned/arikawa/v2/discord"
 	"github.com/diamondburned/arikawa/v2/gateway"
-	"github.com/diamondburned/arikawa/v2/session"
+	"github.com/diamondburned/arikawa/v2/state"
+	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 )
 
 // emoji constants
@@ -28,159 +30,227 @@ const (
 	NavSave        = "💾"
 )
 
-// Paginator provides a method for creating a navigatable embed
-type Paginator struct {
-	sync.Mutex
-	Pages []discord.Embed
-	Index int
+// PageChange is the overloaded enum type to both contain page events and the
+// actual page number.
+type PageChange int
 
-	// Loop back to the beginning or end when on the first or last page.
-	Loop   bool
+const (
+	NextPage PageChange = -iota - 1 // backwards iota
+	PrevPage
+	FirstPage
+	LastPage
+)
+
+// Paginator provides a method for creating a navigatable embed. It is not
+// thread-safe, unless explicitly said otherwise.
+type Paginator struct {
 	Widget *Widget
 
-	Session *session.Session
+	Pages []discord.Embed
+
+	// OnPageChange is called every page change in the main event loop. Callers
+	// could use this callback to update the constant variables. The callback
+	// will be called after the page index has been updated.
+	OnPageChange func(PageChange, error) // optional
+
+	// Loop back to the beginning or end when on the first or last page.
+	Loop bool
 
 	DeleteMessageWhenDone   bool
 	DeleteReactionsWhenDone bool
 	ColourWhenDone          discord.Color // default red
 
-	running bool
+	// States
+
+	index      int
+	cancel     context.CancelFunc
+	pageChange chan PageChange
 }
 
-// NewPaginator returns a new Paginator
+// NewPaginator returns a new Paginator.
+//
 //    ses      : discordgo session
 //    channelID: channelID to spawn the paginator on
-func NewPaginator(ses *session.Session, channelID discord.ChannelID) *Paginator {
+func NewPaginator(state *state.State, channelID discord.ChannelID) *Paginator {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	p := &Paginator{
-		Session:                 ses,
-		Index:                   0,
+		Widget:     NewWidget(state, channelID),
+		pageChange: make(chan PageChange),
+
 		Loop:                    false,
 		DeleteMessageWhenDone:   false,
 		DeleteReactionsWhenDone: false,
 		ColourWhenDone:          0xFF0000,
-		Widget:                  NewWidget(ses, channelID, nil),
+
+		cancel: cancel,
 	}
 
-	p.addHandlers()
+	p.Widget.UseContext(ctx)
 
-	return p
-}
-
-func (p *Paginator) addHandlers() {
 	p.Widget.Handle(NavBeginning, func(r *gateway.MessageReactionAddEvent) {
-		if err := p.Goto(0); err == nil {
-			p.Update()
-		}
+		p.pageChange <- FirstPage
 	})
 	p.Widget.Handle(NavLeft, func(r *gateway.MessageReactionAddEvent) {
-		if err := p.PreviousPage(); err == nil {
-			p.Update()
-		}
+		p.pageChange <- PrevPage
 	})
 	p.Widget.Handle(NavRight, func(r *gateway.MessageReactionAddEvent) {
-		if err := p.NextPage(); err == nil {
-			p.Update()
-		}
+		p.pageChange <- NextPage
 	})
 	p.Widget.Handle(NavEnd, func(r *gateway.MessageReactionAddEvent) {
-		if err := p.Goto(len(p.Pages) - 1); err == nil {
-			p.Update()
-		}
+		p.pageChange <- LastPage
 	})
 	p.Widget.Handle(NavNumbers, func(r *gateway.MessageReactionAddEvent) {
-		m, err := p.Widget.QueryInput(
-			"enter the page number you would like to open",
-			r.UserID, 10*time.Second,
-		)
+		ctx, cancel := context.WithTimeout(context.TODO(), 10*time.Second)
+		defer cancel()
+
+		const prompt = "enter the page number you would like to open."
+
+		m, err := p.Widget.QueryInput(ctx, prompt, r.UserID)
 		if err != nil {
 			return
 		}
 
-		if n, err := strconv.Atoi(m.Content); err == nil {
-			p.Goto(n - 1)
-			p.Update()
+		n, err := strconv.Atoi(m.Content)
+		if err != nil || n < 0 {
+			return
 		}
+
+		p.pageChange <- PageChange(n)
 	})
+
+	return p
 }
 
-// Spawn spawns the paginator in channel p.ChannelID
+// UseContext sets the Paginator and Widget's contexts. It assumes that only one
+// thread will use Paginator, and Widget will only error out when Spawn() is
+// running, thus it assumes that no errors will be returned.
+func (p *Paginator) UseContext(ctx context.Context) {
+	ctx, p.cancel = context.WithCancel(ctx)
+	p.Widget.UseContext(ctx)
+}
+
+// Close stops the Paginator. It is only thread-safe if no other threads will
+// call UseContext.
+func (p *Paginator) Close() {
+	p.cancel()
+}
+
+// Index returns the current page number.
+func (p *Paginator) Index() int {
+	return p.index
+}
+
+// Spawn spawns the paginator in the givne channel. It blocks until close is
+// called or the given context has timed out.
 func (p *Paginator) Spawn() error {
-	if p.Running() {
-		return ErrAlreadyRunning
-	}
-	p.Lock()
-	p.running = true
-	p.Unlock()
+	p.Widget.Embed = *p.Page()
 
-	defer func() {
-		p.Lock()
-		p.running = false
-		p.Unlock()
-
-		// Delete Message when done
-		if p.DeleteMessageWhenDone && p.Widget.Message != nil {
-			p.Session.DeleteMessage(
-				p.Widget.Message.ChannelID,
-				p.Widget.Message.ID,
-			)
-
-		} else if p.ColourWhenDone > 0 {
-			if page, err := p.Page(); err == nil {
-				page.Color = p.ColourWhenDone
-				p.Update()
-			}
-		}
-
-		// Delete reactions when done
-		if p.DeleteReactionsWhenDone && p.Widget.Message != nil {
-			p.Session.DeleteAllReactions(
-				p.Widget.ChannelID,
-				p.Widget.Message.ID,
-			)
-		}
-	}()
-
-	page, err := p.Page()
-	if err != nil {
+	if err := p.Widget.Start(); err != nil {
 		return err
 	}
 
-	p.Widget.Embed = page
+	// Always stop the context at the end.
+	defer p.cancel()
 
-	return p.Widget.Spawn()
-}
+	var change PageChange
 
-// Add a page to the paginator
-//    embed: embed page to add.
-func (p *Paginator) Add(embeds ...discord.Embed) {
-	p.Pages = append(p.Pages, embeds...)
-}
+EventLoop:
+	for {
+		select {
+		case <-p.Widget.Done():
+			break EventLoop
+		case change = <-p.pageChange:
+		}
 
-// Page returns the page of the current index
-func (p *Paginator) Page() (*discord.Embed, error) {
-	p.Lock()
-	defer p.Unlock()
+		var err error
 
-	if p.Index < 0 || p.Index >= len(p.Pages) {
-		return nil, ErrIndexOutOfBounds
+		switch change {
+		case NextPage:
+			err = p.NextPage()
+		case PrevPage:
+			err = p.PreviousPage()
+		case FirstPage:
+			err = p.Goto(0)
+		case LastPage:
+			err = p.Goto(len(p.Pages) - 1)
+		default:
+			err = p.Goto(int(change))
+		}
+
+		if p.OnPageChange != nil {
+			p.OnPageChange(change, err)
+		}
+
+		if err != nil {
+			p.Update()
+		}
 	}
 
-	return &p.Pages[p.Index], nil
+	var wg errgroup.Group
+
+	// Delete Message when done
+	if p.DeleteMessageWhenDone && p.Widget.IsRunning() {
+		wg.Go(func() error {
+			err := p.Widget.State.DeleteMessage(
+				p.Widget.Message.ChannelID,
+				p.Widget.Message.ID,
+			)
+			return errors.Wrap(err, "failed to delete message")
+		})
+
+	} else if p.ColourWhenDone > 0 {
+		page := *p.Page() // copy for thread-safety
+		page.Color = p.ColourWhenDone
+
+		wg.Go(func() error {
+			_, err := p.Widget.UpdateEmbed(page)
+			return errors.Wrap(err, "failed to update embed")
+		})
+	}
+
+	// Delete reactions when done
+	if p.DeleteReactionsWhenDone && p.Widget.IsRunning() {
+		wg.Go(func() error {
+			err := p.Widget.State.DeleteAllReactions(
+				p.Widget.ChannelID,
+				p.Widget.Message.ID,
+			)
+			return errors.Wrap(err, "failed to delete all reactions")
+		})
+	}
+
+	if err := wg.Wait(); err != nil {
+		return errors.Wrap(err, "failed to clean up")
+	}
+
+	p.Widget.Wait()
+	return nil
 }
 
-// NextPage sets the page index to the next page
-func (p *Paginator) NextPage() error {
-	p.Lock()
-	defer p.Unlock()
+// Add a page to the paginator. It also automatically updates embed footers.
+//
+//    embeds: embed pages to add.
+func (p *Paginator) Add(embeds ...discord.Embed) {
+	p.Pages = append(p.Pages, embeds...)
+	p.SetPageFooters()
+}
 
-	if p.Index+1 >= 0 && p.Index+1 < len(p.Pages) {
-		p.Index++
+// Page returns the page of the current index.
+func (p *Paginator) Page() *discord.Embed {
+	return &p.Pages[p.index]
+}
+
+// NextPage sets the page index to the next page.
+func (p *Paginator) NextPage() error {
+	if next := p.index + 1; next >= 0 && next < len(p.Pages) {
+		p.index = next
 		return nil
 	}
 
 	// Set the queue back to the beginning if Loop is enabled.
 	if p.Loop {
-		p.Index = 0
+		p.index = 0
 		return nil
 	}
 
@@ -189,64 +259,46 @@ func (p *Paginator) NextPage() error {
 
 // PreviousPage sets the current page index to the previous page.
 func (p *Paginator) PreviousPage() error {
-	p.Lock()
-	defer p.Unlock()
-
-	if p.Index-1 >= 0 && p.Index-1 < len(p.Pages) {
-		p.Index--
+	if prev := p.index - 1; prev >= 0 && prev < len(p.Pages) {
+		p.index = prev
 		return nil
 	}
 
 	// Set the queue back to the beginning if Loop is enabled.
 	if p.Loop {
-		p.Index = len(p.Pages) - 1
+		p.index = len(p.Pages) - 1
 		return nil
 	}
 
 	return ErrIndexOutOfBounds
 }
 
-// Goto jumps to the requested page index
+// Goto jumps to the requested page index. It does not update the actual embed.
+//
 //    index: The index of the page to go to
 func (p *Paginator) Goto(index int) error {
-	p.Lock()
-	defer p.Unlock()
 	if index < 0 || index >= len(p.Pages) {
 		return ErrIndexOutOfBounds
 	}
-	p.Index = index
+
+	p.index = index
 	return nil
 }
 
-// Update updates the message with the current state of the paginator
-func (p *Paginator) Update() error {
-	if p.Widget.Message == nil {
-		return ErrNilMessage
-	}
-
-	page, err := p.Page()
-	if err != nil {
-		return err
-	}
-
-	_, err = p.Widget.UpdateEmbed(page)
-	return err
+// Update updates the message with the current state of the paginator. Although
+// it is thread-safe, it does not block until the API request is sent through.
+// As such, it will not return an error if the update fails.
+func (p *Paginator) Update() {
+	page := *p.Page() // copy the page embed
+	go p.Widget.UpdateEmbed(page)
 }
 
-// Running returns the running status of the paginator
-func (p *Paginator) Running() bool {
-	p.Lock()
-	running := p.running
-	p.Unlock()
-	return running
-}
-
-// SetPageFooters sets the footer of each embed to
-// Be its page number out of the total length of the embeds.
+// SetPageFooters sets the footer of each embed to the page number out of the
+// total length of the embeds.
 func (p *Paginator) SetPageFooters() {
-	for index, embed := range p.Pages {
+	for i, embed := range p.Pages {
 		embed.Footer = &discord.EmbedFooter{
-			Text: fmt.Sprintf("#[%d / %d]", index+1, len(p.Pages)),
+			Text: fmt.Sprintf("#[%d / %d]", i+1, len(p.Pages)),
 		}
 	}
 }
