@@ -132,7 +132,7 @@ func (w *Widget) Start() error {
 
 		if v, ok := w.Handlers[r.Emoji.Name]; ok {
 			if w.isUserAllowed(r.UserID) {
-				go v(r)
+				v(r)
 			}
 		}
 

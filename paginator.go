@@ -14,7 +14,7 @@ import (
 )
 
 // emoji constants
-const (
+var (
 	NavPlus        = "➕"
 	NavPlay        = "▶"
 	NavPause       = "⏸"
@@ -57,7 +57,7 @@ type Paginator struct {
 	Loop bool
 
 	DeleteMessageWhenDone   bool
-	DeleteReactionsWhenDone bool
+	DeleteReactionsWhenDone bool          // default true
 	ColourWhenDone          discord.Color // default red
 
 	// States
@@ -75,15 +75,13 @@ func NewPaginator(state *state.State, channelID discord.ChannelID) *Paginator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Paginator{
-		Widget:     NewWidget(state, channelID),
-		pageChange: make(chan PageChange),
+		Widget: NewWidget(state, channelID),
 
-		Loop:                    false,
-		DeleteMessageWhenDone:   false,
-		DeleteReactionsWhenDone: false,
+		DeleteReactionsWhenDone: true,
 		ColourWhenDone:          0xFF0000,
 
-		cancel: cancel,
+		cancel:     cancel,
+		pageChange: make(chan PageChange),
 	}
 
 	p.Widget.UseContext(ctx)
