@@ -125,7 +125,15 @@ func NewPaginator(state *state.State, channelID discord.ChannelID) *Paginator {
 // running, thus it assumes that no errors will be returned.
 func (p *Paginator) UseContext(ctx context.Context) {
 	ctx, p.cancel = context.WithCancel(ctx)
-	p.Widget.UseContext(ctx)
+	p.Widget.setContext(ctx)
+}
+
+// SetTimeout sets the timout of the paginator. For more advanced cancellation
+// and timeout control, UseContext should be used instead.
+func (p *Paginator) SetTimeout(timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(p.Widget.ctx, timeout)
+	p.cancel = cancel
+	p.Widget.setContext(ctx)
 }
 
 // Close stops the Paginator. It is only thread-safe if no other threads will

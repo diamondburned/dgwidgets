@@ -73,10 +73,13 @@ func (w *Widget) UseContext(ctx context.Context) error {
 		break
 	}
 
+	w.setContext(ctx)
+	return nil
+}
+
+func (w *Widget) setContext(ctx context.Context) {
 	w.ctx = ctx
 	w.State = w.State.WithContext(w.ctx)
-
-	return nil
 }
 
 // Done returns the internal context channel.
