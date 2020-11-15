@@ -3,7 +3,9 @@ package dgwidgets
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/diamondburned/arikawa/v2/api"
 	"github.com/diamondburned/arikawa/v2/discord"
 	"github.com/diamondburned/arikawa/v2/gateway"
 	"github.com/diamondburned/arikawa/v2/state"
@@ -12,10 +14,13 @@ import (
 
 // error vars
 var (
-	ErrAlreadyRunning   = errors.New("err: Widget already running")
-	ErrIndexOutOfBounds = errors.New("err: Index is out of bounds")
-	ErrNotRunning       = errors.New("err: not running")
+	ErrAlreadyRunning = errors.New("widget already running")
+	ErrNotRunning     = errors.New("not running")
 )
+
+// BackgroundTimeout is the timeout for several background jobs, such as clean
+// ups. If this variable is 0, then clean ups will all be synchronous.
+var BackgroundTimeout = 2 * time.Second
 
 type WidgetHandler = func(*gateway.MessageReactionAddEvent)
 
@@ -38,6 +43,10 @@ type Widget struct {
 	// Only allow listed users to use reactions.
 	UserWhitelist []discord.UserID
 
+	// OnBackgroundError is the callback that is called on trivial errors. It is
+	// optional and most of the time should only be used for debugging.
+	OnBackgroundError func(error)
+
 	ctx    context.Context
 	unbind func()
 
@@ -50,9 +59,10 @@ func NewWidget(state *state.State, channelID discord.ChannelID) *Widget {
 		State:     state,
 		ChannelID: channelID,
 
-		Keys:            []string{},
-		Handlers:        map[string]WidgetHandler{},
-		DeleteReactions: true,
+		Keys:              []string{},
+		Handlers:          map[string]WidgetHandler{},
+		DeleteReactions:   true,
+		OnBackgroundError: func(error) {},
 
 		ctx: context.Background(),
 	}
@@ -97,23 +107,45 @@ func (w *Widget) isUserAllowed(userID discord.UserID) bool {
 	return false
 }
 
+// bgClient uses the BackgroundTimeout variable to determine whether or not to
+// run trivial functions inside a goroutine.
+func (w *Widget) bgClient(fn func(client *api.Client) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), BackgroundTimeout)
+
+	call := func() {
+		err := fn(w.State.Client.WithContext(ctx))
+		cancel()
+
+		if err != nil {
+			w.OnBackgroundError(err)
+		}
+	}
+
+	if BackgroundTimeout == 0 {
+		call()
+	} else {
+		go call()
+	}
+}
+
 // Spawn spawns the widget in the given channel and blocks until the context has
 // expired.
 func (w *Widget) Spawn() error {
-	if err := w.Start(); err != nil {
-		return err
+	if err := w.BindMessage(); err != nil {
+		return errors.Wrap(err, "failed to start widget")
+	}
+	if err := w.SendReactions(); err != nil {
+		return errors.Wrap(err, "failed to add reactions")
 	}
 	w.Wait()
 	return nil
 }
 
-// Starts sends out embeds and reactions but does not wait for timeout.
-func (w *Widget) Start() error {
+// BindMessage adds handlers and sends out embeds but does not wait for timeout.
+func (w *Widget) BindMessage() error {
 	if w.running {
 		return ErrAlreadyRunning
 	}
-
-	w.running = true
 
 	// We need the bot's user ID.
 	u, err := w.State.Me()
@@ -133,30 +165,49 @@ func (w *Widget) Start() error {
 			return
 		}
 
-		if v, ok := w.Handlers[r.Emoji.Name]; ok {
-			if w.isUserAllowed(r.UserID) {
-				v(r)
-			}
+		if !w.isUserAllowed(r.UserID) {
+			return
 		}
 
-		if w.DeleteReactions && w.isUserAllowed(r.UserID) {
-			w.State.DeleteUserReaction(
-				r.ChannelID,
-				r.MessageID,
-				r.UserID,
-				r.Emoji.Name,
-			)
+		fn, ok := w.Handlers[r.Emoji.Name]
+		if !ok {
+			return
+		}
+
+		fn(r)
+
+		if w.DeleteReactions {
+			w.bgClient(func(client *api.Client) error {
+				return client.DeleteUserReaction(
+					r.ChannelID,
+					r.MessageID,
+					r.UserID,
+					r.Emoji.Name,
+				)
+			})
 		}
 	})
 
 	// Create initial message.
 	msg, err := w.State.SendEmbed(w.ChannelID, w.Embed)
 	if err != nil {
+		w.unbind() // clean up because fatal
 		return err
 	}
 	w.Message = *msg
 
-	// Add reaction buttons
+	// We're only ever running if everything went right.
+	w.running = true
+
+	return nil
+}
+
+// AddReactions adds the reaction buttons into the message.
+func (w *Widget) SendReactions() error {
+	if !w.running {
+		return ErrNotRunning
+	}
+
 	for _, v := range w.Keys {
 		if err := w.State.React(w.Message.ChannelID, w.Message.ID, v); err != nil {
 			return errors.Wrap(err, "failed to react to message")
@@ -166,9 +217,10 @@ func (w *Widget) Start() error {
 	return nil
 }
 
-// Wait waits until the widget has expired.
+// Wait waits until the widget has expired and then removes the handlers.
 func (w *Widget) Wait() {
 	<-w.ctx.Done()
+	w.unbind()
 }
 
 // Handle adds a handler for the given emoji name.
@@ -239,7 +291,14 @@ WaitLoop:
 
 // IsRunning returns true if the widget is running.
 func (w *Widget) IsRunning() bool {
-	return w.running
+	// Not running if context is timed out.
+	select {
+	case <-w.ctx.Done():
+		w.running = false
+		return false
+	default:
+		return w.running
+	}
 }
 
 // UpdateEmbed updates the embed object and edits the original message.
@@ -248,4 +307,20 @@ func (w *Widget) IsRunning() bool {
 func (w *Widget) UpdateEmbed(embed discord.Embed) (*discord.Message, error) {
 	w.Embed = embed
 	return w.State.EditEmbed(w.ChannelID, w.Message.ID, embed)
+}
+
+// UpdateEmbedAsync does what UpdateEmbed does, but it does not block while
+// sending the HTTP request. This is mostly made for internal use; one should
+// use UpdateEmbed instead.
+//
+// errCh is optional. The error returned from EditEmbed will simply be ignored
+// if errCh is nil. If no errors are returned, then errCh isn't used.
+func (w *Widget) UpdateEmbedAsync(embed discord.Embed, errCh chan<- error) {
+	w.Embed = embed
+	go func() {
+		_, err := w.State.EditEmbed(w.ChannelID, w.Message.ID, embed)
+		if err != nil && errCh != nil {
+			errCh <- err
+		}
+	}()
 }
