@@ -289,8 +289,6 @@ func (p *Paginator) NextPage() {
 		p.index = 0
 		return
 	}
-
-	return
 }
 
 // PreviousPage sets the current page index to the previous page.
@@ -330,8 +328,8 @@ func (p *Paginator) Update() {
 // SetPageFooters sets the footer of each embed to the page number out of the
 // total length of the embeds.
 func (p *Paginator) SetPageFooters() {
-	for i, embed := range p.Pages {
-		embed.Footer = &discord.EmbedFooter{
+	for i := range p.Pages {
+		p.Pages[i].Footer = &discord.EmbedFooter{
 			Text: fmt.Sprintf("#[%d / %d]", i+1, len(p.Pages)),
 		}
 	}
