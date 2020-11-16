@@ -40,7 +40,8 @@ type Widget struct {
 
 	// Delete reactions after they are added
 	DeleteReactions bool
-	// Only allow listed users to use reactions.
+	// Only allow listed users to use reactions. A nil slice allows everyone
+	// (default).
 	UserWhitelist []discord.UserID
 
 	// OnBackgroundError is the callback that is called on trivial errors. It is
@@ -99,6 +100,9 @@ func (w *Widget) Done() <-chan struct{} {
 
 // isUserAllowed returns true if the user is allowed to use this widget.
 func (w *Widget) isUserAllowed(userID discord.UserID) bool {
+	if w.UserWhitelist == nil {
+		return true
+	}
 	for _, user := range w.UserWhitelist {
 		if user == userID {
 			return true
