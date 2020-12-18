@@ -34,9 +34,9 @@ type Widget struct {
 	Message discord.Message
 
 	// Handlers binds emoji names to functions
-	Handlers map[string]WidgetHandler
+	Handlers map[discord.APIEmoji]WidgetHandler
 	// keys stores the handlers keys in the order they were added
-	Keys []string
+	Keys []discord.APIEmoji
 
 	// Delete reactions after they are added
 	DeleteReactions bool
@@ -60,8 +60,7 @@ func NewWidget(state *state.State, channelID discord.ChannelID) *Widget {
 		State:     state,
 		ChannelID: channelID,
 
-		Keys:              []string{},
-		Handlers:          map[string]WidgetHandler{},
+		Handlers:          map[discord.APIEmoji]WidgetHandler{},
 		DeleteReactions:   true,
 		OnBackgroundError: func(error) {},
 
@@ -173,7 +172,7 @@ func (w *Widget) BindMessage() error {
 			return
 		}
 
-		fn, ok := w.Handlers[r.Emoji.Name]
+		fn, ok := w.Handlers[r.Emoji.APIString()]
 		if !ok {
 			return
 		}
@@ -186,7 +185,7 @@ func (w *Widget) BindMessage() error {
 					r.ChannelID,
 					r.MessageID,
 					r.UserID,
-					r.Emoji.Name,
+					r.Emoji.APIString(),
 				)
 			})
 		}
@@ -231,7 +230,7 @@ func (w *Widget) Wait() {
 //
 //    emojiName: The unicode value of the emoji
 //    handler  : handler function to call when the emoji is clicked
-func (w *Widget) Handle(emojiName string, handler WidgetHandler) error {
+func (w *Widget) Handle(emojiName discord.APIEmoji, handler WidgetHandler) error {
 	if _, ok := w.Handlers[emojiName]; !ok {
 		w.Keys = append(w.Keys, emojiName)
 		w.Handlers[emojiName] = handler

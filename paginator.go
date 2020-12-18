@@ -12,21 +12,21 @@ import (
 	"github.com/diamondburned/arikawa/v2/state"
 )
 
-// emoji constants
+// Emoji variables.
 var (
-	NavPlus        = "➕"
-	NavPlay        = "▶"
-	NavPause       = "⏸"
-	NavStop        = "⏹"
-	NavRight       = "➡"
-	NavLeft        = "⬅"
-	NavUp          = "⬆"
-	NavDown        = "⬇"
-	NavEnd         = "⏩"
-	NavBeginning   = "⏪"
-	NavNumbers     = "🔢"
-	NavInformation = "ℹ"
-	NavSave        = "💾"
+	NavPlus        discord.APIEmoji = "➕"
+	NavPlay        discord.APIEmoji = "▶"
+	NavPause       discord.APIEmoji = "⏸"
+	NavStop        discord.APIEmoji = "⏹"
+	NavRight       discord.APIEmoji = "➡"
+	NavLeft        discord.APIEmoji = "⬅"
+	NavUp          discord.APIEmoji = "⬆"
+	NavDown        discord.APIEmoji = "⬇"
+	NavEnd         discord.APIEmoji = "⏩"
+	NavBeginning   discord.APIEmoji = "⏪"
+	NavNumbers     discord.APIEmoji = "🔢"
+	NavInformation discord.APIEmoji = "ℹ"
+	NavSave        discord.APIEmoji = "💾"
 )
 
 // PromptTimeout is the variable for the duration to wait before the page number
