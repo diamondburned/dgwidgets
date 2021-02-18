@@ -22,6 +22,7 @@ var (
 // ups. If this variable is 0, then clean ups will all be synchronous.
 var BackgroundTimeout = 2 * time.Second
 
+// WidgetHandler -- Self explanatory
 type WidgetHandler = func(*gateway.MessageReactionAddEvent)
 
 // Widget is a message embed with reactions for buttons. It accepts custom
@@ -32,6 +33,13 @@ type Widget struct {
 
 	Embed   discord.Embed
 	Message discord.Message
+
+	// ReplyTo references a messageID to reply to.
+	// Can be empty (0)
+	ReplyTo discord.MessageID
+
+	// ReplyWithMention specifies if the user to reply to has to be mentioned
+	ReplyWithMention bool
 
 	// Handlers binds emoji names to functions
 	Handlers map[discord.APIEmoji]WidgetHandler
@@ -192,7 +200,13 @@ func (w *Widget) BindMessage() error {
 	})
 
 	// Create initial message.
-	msg, err := w.State.SendEmbed(w.ChannelID, w.Embed)
+	msg, err := w.State.SendMessageComplex(w.ChannelID, api.SendMessageData{
+		Embed: &w.Embed,
+		Reference: &discord.MessageReference{
+			MessageID: w.ReplyTo,
+		},
+		AllowedMentions: &api.AllowedMentions{RepliedUser: &w.ReplyWithMention},
+	})
 	if err != nil {
 		w.unbind() // clean up because fatal
 		return err
@@ -205,7 +219,7 @@ func (w *Widget) BindMessage() error {
 	return nil
 }
 
-// AddReactions adds the reaction buttons into the message.
+// SendReactions adds the reaction buttons into the message.
 func (w *Widget) SendReactions() error {
 	if !w.running {
 		return ErrNotRunning

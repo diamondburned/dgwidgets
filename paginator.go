@@ -170,7 +170,7 @@ func (p *Paginator) Spawn() (err error) {
 		}
 
 		if n < 1 {
-			p.sendErr(fmt.Errorf("Input %d is zero or negative.", n))
+			p.sendErr(fmt.Errorf("input %d is zero or negative", n))
 			return
 		}
 
@@ -215,7 +215,7 @@ EventLoop:
 			p.Goto(len(p.Pages) - 1)
 		default:
 			if !p.Goto(int(change)) {
-				err = fmt.Errorf("Page %d is out of bounds.", change)
+				err = fmt.Errorf("page %d is out of bounds", change)
 			}
 		}
 
