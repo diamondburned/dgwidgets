@@ -207,6 +207,7 @@ func (w *Widget) BindMessage() error {
 		},
 		AllowedMentions: &api.AllowedMentions{RepliedUser: &w.ReplyWithMention},
 	})
+
 	if err != nil {
 		w.unbind() // clean up because fatal
 		return err
