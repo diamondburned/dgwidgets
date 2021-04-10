@@ -67,10 +67,11 @@ type Paginator struct {
 
 	// States
 
-	index      int
-	bgWait     sync.WaitGroup
-	errorCh    chan error
-	pageChange chan PageChange
+	index         int
+	bgWait        sync.WaitGroup
+	errorCh       chan error
+	pageChange    chan PageChange
+	timeoutCancel context.CancelFunc
 }
 
 // NewPaginator returns a new Paginator.
@@ -93,15 +94,21 @@ func NewPaginator(state *state.State, channelID discord.ChannelID) *Paginator {
 // thread will use Paginator, and Widget will only error out when Spawn() is
 // running, thus it assumes that no errors will be returned.
 func (p *Paginator) UseContext(ctx context.Context) {
+	if p.timeoutCancel != nil {
+		p.timeoutCancel()
+		p.timeoutCancel = nil
+	}
+
 	p.Widget.setContext(ctx)
 }
 
-// UseTimeout sets the timeout of the paginator. The returned function is used
-// for stopping Paginator. For more advanced cancellation and timeout control,
-// UseContext should be used instead.
-func (p *Paginator) UseTimeout(timeout time.Duration) context.CancelFunc {
+// SetTimeout sets the timeout of the paginator. The returned function is used
+// for stopping Paginator; it is optional to call the function. For more
+// advanced cancellation and timeout control, UseContext should be used instead.
+func (p *Paginator) SetTimeout(timeout time.Duration) context.CancelFunc {
 	ctx, cancel := context.WithTimeout(p.Widget.ctx, timeout)
-	p.Widget.setContext(ctx)
+	p.UseContext(ctx)
+	p.timeoutCancel = cancel
 	return cancel
 }
 
@@ -177,6 +184,11 @@ func (p *Paginator) Spawn() (err error) {
 	}()
 
 	defer p.bgWait.Wait()
+
+	// Ensure the context is cleaned up once the time runs out.
+	if p.timeoutCancel != nil {
+		defer p.timeoutCancel()
+	}
 
 	var change PageChange
 

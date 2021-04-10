@@ -80,19 +80,11 @@ func NewWidget(state *state.State, channelID discord.ChannelID) *Widget {
 	}
 }
 
-// UseContext sets the internal context for everything. It errors out only if
-// the Widget has already been spawned.
+// UseContext sets the internal context for everything. It only errors out only
+// if the Widget has already been spawned.
 func (w *Widget) UseContext(ctx context.Context) error {
 	if w.IsRunning() {
 		return ErrAlreadyRunning
-	}
-
-	// Verify that the context is not expired.
-	select {
-	case <-w.ctx.Done():
-		return w.ctx.Err()
-	default:
-		break
 	}
 
 	w.setContext(ctx)
