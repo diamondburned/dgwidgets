@@ -41,6 +41,10 @@ type Widget struct {
 	// Handlers binds emoji names to functions
 	Handlers []EmojiHandler
 
+	// UnreactUser means to unreact the user immediately after they reacted. It
+	// is true by default.
+	UnreactUser bool
+
 	// Only allow listed users to use reactions. A nil slice allows everyone
 	// (default).
 	UserWhitelist []discord.UserID
@@ -72,6 +76,7 @@ func NewWidget(state *state.State, channelID discord.ChannelID) *Widget {
 		State:     state,
 		ChannelID: channelID,
 
+		UnreactUser:       true,
 		OnBackgroundError: func(error) {},
 		BackgroundTimeout: BackgroundTimeout,
 
@@ -204,13 +209,17 @@ func (w *Widget) SendReactions() error {
 func (w *Widget) Wait() {
 	defer w.unbindCh()
 
-	var r *gateway.MessageReactionAddEvent
+	var wg sync.WaitGroup // for bgClient
+	defer wg.Wait()
+
 	for {
+		var r *gateway.MessageReactionAddEvent
+
 		select {
-		case <-w.ctx.Done():
-			return
 		case r = <-w.reactCh:
 
+		case <-w.ctx.Done():
+			return
 		}
 
 		// Ignore reactions that don't belong to the message or from the bot or
@@ -227,6 +236,17 @@ func (w *Widget) Wait() {
 		}
 
 		w.Handlers[ix].Handler(r)
+
+		if w.UnreactUser {
+			w.bgClient(&wg, func(client *api.Client) error {
+				return client.DeleteUserReaction(
+					r.ChannelID,
+					r.MessageID,
+					r.UserID,
+					r.Emoji.APIString(),
+				)
+			})
+		}
 
 		// Force check that the context has not been expired after running our
 		// callback.
