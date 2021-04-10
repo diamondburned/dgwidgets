@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/diamondburned/arikawa/v2/api"
@@ -66,10 +67,11 @@ type Paginator struct {
 
 	// States
 
-	index      int
-	cancel     context.CancelFunc
-	errorCh    chan error
-	pageChange chan PageChange
+	index         int
+	bgWait        sync.WaitGroup
+	errorCh       chan error
+	pageChange    chan PageChange
+	timeoutCancel context.CancelFunc
 }
 
 // NewPaginator returns a new Paginator.
@@ -77,45 +79,37 @@ type Paginator struct {
 //    ses      : discordgo session
 //    channelID: channelID to spawn the paginator on
 func NewPaginator(state *state.State, channelID discord.ChannelID) *Paginator {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	p := &Paginator{
+	return &Paginator{
 		Widget: NewWidget(state, channelID),
 
 		DeleteReactionsWhenDone: true,
 		ColourWhenDone:          0xFF0000,
 
-		cancel:     cancel,
 		errorCh:    make(chan error, 1),
 		pageChange: make(chan PageChange, 1),
 	}
-
-	p.Widget.UseContext(ctx)
-
-	return p
 }
 
 // UseContext sets the Paginator and Widget's contexts. It assumes that only one
 // thread will use Paginator, and Widget will only error out when Spawn() is
 // running, thus it assumes that no errors will be returned.
 func (p *Paginator) UseContext(ctx context.Context) {
-	ctx, p.cancel = context.WithCancel(ctx)
+	if p.timeoutCancel != nil {
+		p.timeoutCancel()
+		p.timeoutCancel = nil
+	}
+
 	p.Widget.setContext(ctx)
 }
 
-// SetTimeout sets the timout of the paginator. For more advanced cancellation
-// and timeout control, UseContext should be used instead.
-func (p *Paginator) SetTimeout(timeout time.Duration) {
+// SetTimeout sets the timeout of the paginator. The returned function is used
+// for stopping Paginator; it is optional to call the function. For more
+// advanced cancellation and timeout control, UseContext should be used instead.
+func (p *Paginator) SetTimeout(timeout time.Duration) context.CancelFunc {
 	ctx, cancel := context.WithTimeout(p.Widget.ctx, timeout)
-	p.cancel = cancel
-	p.Widget.setContext(ctx)
-}
-
-// Close stops the Paginator. It is only thread-safe if no other threads will
-// call UseContext. Spawn will automatically call Close, so most of the time,
-// the main caller does not need to call this.
-func (p *Paginator) Close() {
-	p.cancel()
+	p.UseContext(ctx)
+	p.timeoutCancel = cancel
+	return cancel
 }
 
 // Index returns the current zero-indexed page number.
@@ -125,14 +119,17 @@ func (p *Paginator) Index() int {
 
 func (p *Paginator) sendChange(ch PageChange) {
 	select {
-	case p.pageChange <- ch:
 	case <-p.Widget.Done():
+	case p.pageChange <- ch:
 	}
 }
 
 func (p *Paginator) sendErr(err error) {
 	if err != nil {
-		p.errorCh <- err
+		select {
+		case <-p.Widget.Done():
+		case p.errorCh <- err:
+		}
 	}
 }
 
@@ -154,10 +151,11 @@ func (p *Paginator) Spawn() (err error) {
 	p.Widget.Handle(NavNumbers, func(r *gateway.MessageReactionAddEvent) {
 		ctx, cancel := context.WithTimeout(context.TODO(), PromptTimeout)
 		defer cancel()
+		state := p.Widget.State.WithContext(ctx)
 
 		const prompt = "enter the page number you would like to open."
 
-		m, err := p.Widget.QueryInput(ctx, prompt, r.UserID)
+		m, err := QueryInput(state, p.Widget.ChannelID, r.UserID, prompt, true)
 		if err != nil {
 			p.sendErr(err)
 			return
@@ -177,19 +175,20 @@ func (p *Paginator) Spawn() (err error) {
 		p.sendChange(PageChange(n - 1)) // account for zero-indexed
 	})
 
-	p.Widget.Embed = *p.Page()
+	p.Widget.SendData.Embed = p.Page()
 
-	if err := p.Widget.BindMessage(); err != nil {
-		return err
+	p.bgWait.Add(1)
+	go func() {
+		p.sendErr(p.Widget.Spawn())
+		p.bgWait.Done()
+	}()
+
+	defer p.bgWait.Wait()
+
+	// Ensure the context is cleaned up once the time runs out.
+	if p.timeoutCancel != nil {
+		defer p.timeoutCancel()
 	}
-
-	// Send the reactions asynchronously so we could listen to events right
-	// away. The method only reads, so we should be fine.
-	go func() { p.sendErr(p.Widget.SendReactions()) }()
-
-	// Always stop the context at the end.
-	defer p.Widget.Wait()
-	defer p.Close()
 
 	var change PageChange
 
@@ -231,13 +230,12 @@ EventLoop:
 	}
 
 	// Copy the needed IDs so we could background jobs properly.
-	messageID := p.Widget.Message.ID
-	channelID := p.Widget.Message.ChannelID
+	messageID := p.Widget.SentMessage.ID
+	channelID := p.Widget.SentMessage.ChannelID
 
-	// Delete Message when done
 	if p.DeleteMessageWhenDone {
-		p.Widget.bgClient(func(client *api.Client) error {
-			return p.Widget.State.DeleteMessage(channelID, messageID)
+		p.Widget.bgClient(&p.bgWait, func(client *api.Client) error {
+			return client.DeleteMessage(channelID, messageID)
 		})
 
 		// Don't bother doing the rest of the tasks because the message is gone.
@@ -248,7 +246,7 @@ EventLoop:
 		page := *p.Page() // copy for thread-safety
 		page.Color = p.ColourWhenDone
 
-		p.Widget.bgClient(func(client *api.Client) error {
+		p.Widget.bgClient(&p.bgWait, func(client *api.Client) error {
 			_, err := client.EditEmbed(channelID, messageID, page)
 			return err
 		})
@@ -256,7 +254,7 @@ EventLoop:
 
 	// Delete reactions when done
 	if p.DeleteReactionsWhenDone {
-		p.Widget.bgClient(func(client *api.Client) error {
+		p.Widget.bgClient(&p.bgWait, func(client *api.Client) error {
 			return client.DeleteAllReactions(channelID, messageID)
 		})
 	}
@@ -264,9 +262,7 @@ EventLoop:
 	return
 }
 
-// Add a page to the paginator. It also automatically updates embed footers.
-//
-//    embeds: embed pages to add.
+// Add a page to the paginator and automatically updates embed footers.
 func (p *Paginator) Add(embeds ...discord.Embed) {
 	p.Pages = append(p.Pages, embeds...)
 	p.SetPageFooters()
@@ -306,8 +302,6 @@ func (p *Paginator) PreviousPage() {
 }
 
 // Goto jumps to the requested page index. It does not update the actual embed.
-//
-//    index: The index of the page to go to
 func (p *Paginator) Goto(index int) bool {
 	if index < 0 || index >= len(p.Pages) {
 		return false
@@ -321,8 +315,9 @@ func (p *Paginator) Goto(index int) bool {
 // it is thread-safe, it does not block until the API request is sent through.
 // As such, it will not return an error if the update fails.
 func (p *Paginator) Update() {
-	page := *p.Page() // copy the page embed
-	p.Widget.UpdateEmbedAsync(page, p.errorCh)
+	p.Widget.UpdateMessageAsync(p.errorCh, api.EditMessageData{
+		Embed: p.Page(),
+	})
 }
 
 // SetPageFooters sets the footer of each embed to the page number out of the
