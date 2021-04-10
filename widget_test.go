@@ -44,6 +44,9 @@ func newTestWidget(t *testing.T, ctx context.Context) (*Widget, *state.State) {
 		t.Fatal("failed to add reactions:", err)
 	}
 
+	// TODO: move handler registration up so Eval actually passes.
+	// mock.Eval()
+
 	return w, state
 }
 
